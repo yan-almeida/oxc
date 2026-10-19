@@ -215,13 +215,109 @@ fn try_fold_string_substring_or_slice<'a>(
     };
     let start = to_unit(start_idx, 0);
     let end = to_unit(end_idx, usize::MAX).max(start);
-    // Collect the code units of the window.
-    // A window boundary may split a surrogate pair.
-    // The lone half is representable, so the result is exact.
-    let capacity = (end - start).saturating_mul(3).min(value.len());
+    // Skip the prefix once, then size the actual UTF-16 window. An omitted end must not
+    // reserve the whole receiver for a tiny suffix. Counting only the window also avoids
+    // scanning the rest of the receiver when an explicit end selects a short prefix.
+    let mut units = value.encode_utf16();
+    if start > 0 {
+        units.nth(start - 1);
+    }
+    let units = units.take(end - start);
+    // Each unit takes at most three bytes, including a half split from a surrogate pair.
+    let capacity = units.clone().count().saturating_mul(3).min(value.len());
     let mut result = JSStrBuilder::with_capacity_in(capacity, ctx);
-    result.push_code_units(value.encode_utf16().skip(start).take(end - start));
+    result.push_code_units(units);
     Some(ConstantValue::String(result.into_js_str()))
+}
+
+#[cfg(test)]
+mod substring_tests {
+    use oxc_allocator::{Allocator, GetAllocator};
+    use oxc_ast::builder::{AstBuilder, GetAstBuilder};
+    use oxc_span::SPAN;
+
+    use super::*;
+    use crate::{
+        GlobalContext,
+        side_effects::{MayHaveSideEffectsContext, PropertyReadSideEffects},
+    };
+
+    struct Context<'a>(AstBuilder<'a>);
+
+    impl<'a> GetAllocator<'a> for Context<'a> {
+        fn allocator(&self) -> &'a Allocator {
+            self.0.allocator()
+        }
+    }
+
+    impl<'a> GetAstBuilder<'a> for Context<'a> {
+        type Builder = AstBuilder<'a>;
+
+        fn builder(&self) -> &AstBuilder<'a> {
+            &self.0
+        }
+    }
+
+    impl<'a> GlobalContext<'a> for Context<'a> {
+        fn is_global_reference(&self, _: &IdentifierReference<'a>) -> bool {
+            false
+        }
+    }
+
+    impl<'a> MayHaveSideEffectsContext<'a> for Context<'a> {
+        fn annotations(&self) -> bool {
+            false
+        }
+
+        fn manual_pure_functions(&self, _: &Expression) -> bool {
+            false
+        }
+
+        fn property_read_side_effects(&self) -> PropertyReadSideEffects {
+            PropertyReadSideEffects::All
+        }
+
+        fn unknown_global_side_effects(&self) -> bool {
+            true
+        }
+    }
+
+    impl<'a> ConstantEvaluationCtx<'a> for Context<'a> {}
+
+    #[test]
+    fn substring_allocates_for_the_clamped_window() {
+        let large = "x".repeat(1_000_000);
+        for (text, start, end, expected) in [
+            (large.as_str(), 999_999.0, None, "x"),
+            (large.as_str(), 999_999.0, Some(1_000_000.0), "x"),
+            (large.as_str(), 1_000_000.0, None, ""),
+            // The byte length exceeds the UTF-16 length.
+            ("é😀", 4.0, None, ""),
+        ] {
+            let allocator = Allocator::new();
+            let ctx = Context(AstBuilder::new(&allocator));
+            let object = Expression::new_string_literal(SPAN, JSStr::from(text), None, &ctx);
+            let args = ArenaVec::from_iter_in(
+                std::iter::once(start).chain(end).map(|value| {
+                    Argument::from(Expression::new_numeric_literal(
+                        SPAN,
+                        value,
+                        None,
+                        NumberBase::Decimal,
+                        &ctx,
+                    ))
+                }),
+                &ctx,
+            );
+            let before = allocator.used_bytes();
+            let result = try_fold_string_substring_or_slice(&args, &object, &ctx)
+                .unwrap()
+                .into_string()
+                .unwrap();
+            assert_eq!(result.as_str(), Some(expected));
+            assert!(allocator.used_bytes() - before <= expected.len() * 3);
+        }
+    }
 }
 
 fn try_fold_string_char_at<'a>(

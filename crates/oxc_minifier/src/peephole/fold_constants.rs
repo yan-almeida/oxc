@@ -10,7 +10,7 @@ use oxc_ecmascript::{
 };
 use oxc_semantic::IsGlobalReference;
 use oxc_span::{GetSpan, SPAN};
-use oxc_str::{JSStr, Str};
+use oxc_str::JSStr;
 use oxc_syntax::operator::{AssignmentOperator, BinaryOperator, LogicalOperator};
 
 use crate::{TraverseCtx, generated::ancestor::Ancestor};
@@ -633,7 +633,7 @@ impl<'a> PeepholeOptimizations {
                     .quasis
                     .first_mut()
                     .expect("template literal must have at least one quasi");
-                left_last_quasi.value.raw = Str::from_strs_array_in(
+                left_last_quasi.value.raw = Self::concat_template_literal_raw(
                     [left_last_quasi.value.raw.as_str(), right_first_quasi.value.raw.as_str()],
                     ctx,
                 );
@@ -658,7 +658,7 @@ impl<'a> PeepholeOptimizations {
                 left.span = left.span.merge_within(right_expr.span(), parent_span).unwrap_or(SPAN);
                 let last_quasi =
                     left.quasis.last_mut().expect("template literal must have at least one quasi");
-                last_quasi.value.raw = Str::from_strs_array_in(
+                last_quasi.value.raw = Self::concat_template_literal_raw(
                     [
                         last_quasi.value.raw.as_str(),
                         Self::escape_string_for_template_literal(right_str).as_ref(),
@@ -680,7 +680,7 @@ impl<'a> PeepholeOptimizations {
                     .quasis
                     .first_mut()
                     .expect("template literal must have at least one quasi");
-                first_quasi.value.raw = Str::from_strs_array_in(
+                first_quasi.value.raw = Self::concat_template_literal_raw(
                     [
                         Self::escape_string_for_template_literal(left_str).as_ref(),
                         first_quasi.value.raw.as_str(),
@@ -1034,21 +1034,7 @@ impl<'a> PeepholeOptimizations {
             let escaped = Self::escape_string_for_template_literal(value);
             let next_raw = next_quasi.as_ref().map(|q| q.value.raw.as_str()).unwrap_or_default();
             let raw = quasi.value.raw.as_str();
-            let starts_with_digit = escaped
-                .as_bytes()
-                .first()
-                .or_else(|| next_raw.as_bytes().first())
-                .is_some_and(u8::is_ascii_digit);
-            let cooked_ends_with_null =
-                quasi.value.cooked.is_some_and(|cooked| cooked.as_bytes().last() == Some(&0));
-            quasi.value.raw = if starts_with_digit
-                && cooked_ends_with_null
-                && let Some(prefix) = raw.strip_suffix("\\0")
-            {
-                Str::from_strs_array_in([prefix, "\\x00", &escaped, next_raw], ctx)
-            } else {
-                Str::from_strs_array_in([raw, &escaped, next_raw], ctx)
-            };
+            quasi.value.raw = Self::concat_template_literal_raw([raw, &escaped, next_raw], ctx);
             let new_cooked = if let (Some(cooked1), Some(cooked2)) =
                 (quasi.value.cooked, next_quasi.as_ref().map(|q| q.value.cooked))
             {

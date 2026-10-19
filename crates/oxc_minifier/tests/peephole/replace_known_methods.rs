@@ -1043,16 +1043,35 @@ fn test_fold_string_from_char_code() {
 }
 
 #[test]
+fn string_concat_preserves_coercion_order() {
+    test_same(r#"x = "\uD800".concat(a, b())"#);
+    test_same(r#"x = "\uD800".concat(a, b()).concat("tail")"#);
+    test_same(r#"x = "\uD800".concat(a).concat(b())"#);
+    // A primitive cannot observe a later argument's mutation through coercion.
+    test(r#"x = "\uD800".concat(1, b())"#, r"x = `\ud8001${b()}`");
+    // A local parameter read can cross an earlier coercion.
+    test(
+        r#"function f(a) { return "\uD800".concat(b(), a) }"#,
+        r"function f(a) { return `\ud800${b()}${a}` }",
+    );
+    test(
+        r#"function f(a, b) { return "\uD800".concat(a, b) }"#,
+        r"function f(a, b) { return `\ud800${a}${b}` }",
+    );
+}
+
+#[test]
 fn test_fold_string_concat() {
     // A lone surrogate is kept as an escape in the template's raw text.
-    test(r#"x = "\uD800".concat(a, b)"#, "x = `\\ud800${a}${b}`");
-    test(r#"x = "\uD800".concat(a).concat(b())"#, "x = `\\ud800${a}${b()}`");
+    test_same(r#"x = "\uD800".concat(a, b)"#);
+    test_same(r#"x = "\uD800".concat(a).concat(b())"#);
     test(r#"x = "\uD83D".concat(a, "\uDE00")"#, "x = `\\ud83d${a}\\ude00`");
     test(r#"x = "\uD83D".concat("\uDE00", a)"#, "x = `\u{1F600}${a}`");
     test_same("x = ''.concat()");
-    test("x = ''.concat(a, b)", "x = `${a}${b}`");
-    test("x = ''.concat(a, b, c)", "x = `${a}${b}${c}`");
-    test("x = ''.concat(a, b, c, d)", "x = `${a}${b}${c}${d}`");
+    // Unresolved reads can invoke a global getter or throw, so they cannot cross coercion.
+    test_same("x = ''.concat(a, b)");
+    test_same("x = ''.concat(a, b, c)");
+    test_same("x = ''.concat(a, b, c, d)");
     test_same("x = ''.concat(a, b, c, d, e)");
     test("x = ''.concat('a')", "x = 'a'");
     test("x = ''.concat('a', 'b')", "x = 'ab'");
@@ -1061,11 +1080,10 @@ fn test_fold_string_concat() {
     test("x = ''.concat('a', 'b', 'c', 'd', 'e')", "x = 'abcde'");
     test("x = ''.concat(a, 'b')", "x = `${a}b`");
     test("x = ''.concat('a', b)", "x = `a${b}`");
-    test("x = ''.concat(a, 'b', c)", "x = `${a}b${c}`");
+    test_same("x = ''.concat(a, 'b', c)");
     test("x = ''.concat('a', b, 'c')", "x = `a${b}c`");
-    test(
+    test_same(
         "x = ''.concat('a', b, 'c', d, 'e', f, 'g', h, 'i', j, 'k', l, 'm', n, 'o', p, 'q', r, 's', t)",
-        "x = `a${b}c${d}e${f}g${h}i${j}k${l}m${n}o${p}q${r}s${t}`",
     );
     test("x = ''.concat(a, 1)", "x = `${a}1`");
 

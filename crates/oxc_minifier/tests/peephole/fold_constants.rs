@@ -1553,6 +1553,22 @@ fn test_inline_values_in_template_literal() {
 }
 
 #[test]
+fn template_joins_preserve_raw_boundaries() {
+    fold(r#"x = `${z}$` + "{a}\uD800""#, r"x = `${z}$\{a}\ud800`");
+    fold(r#"x = `$${"{a}\uD800"}${z}`"#, r"x = `$\{a}\ud800${z}`");
+    fold(r#"x = `$${""}{a}${z}`"#, r"x = `$\{a}${z}`");
+    fold(r"x = `${z}$` + `{a}${w}`", r"x = `${z}$\{a}${w}`");
+    fold(r#"x = `${z}\0` + "1\uD800""#, r"x = `${z}\x001\ud800`");
+    fold(r"x = `${z}\0` + `1${w}`", r"x = `${z}\x001${w}`");
+    fold(r#"x = `${z}\0${""}1${w}`"#, r"x = `${z}\x001${w}`");
+    // An escaped backslash followed by zero is not a null escape.
+    fold(r#"x = `${z}\\0` + "1\uD800""#, r"x = `${z}\\01\ud800`");
+    fold(r#"x = `${z}\\\0` + "1\uD800""#, r"x = `${z}\\\x001\ud800`");
+    // An already escaped dollar must keep its original value.
+    fold(r#"x = `${z}\$` + "{a}\uD800""#, r"x = `${z}\${a}\ud800`");
+}
+
+#[test]
 fn string_method_folds_handle_lone_surrogates() {
     // A lone surrogate in the receiver is one UTF-16 code unit.
     // The numeric folds count it like any other unit.

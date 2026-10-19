@@ -2,12 +2,12 @@ use std::{borrow::Cow, fmt::Write, mem};
 
 use cow_utils::CowUtils;
 
-use oxc_allocator::{ArenaBox, ArenaVec, GetAllocator, TakeIn};
+use oxc_allocator::{ArenaBox, ArenaVec, GetAllocator, StringBuilder, TakeIn};
 use oxc_ast::{ast::*, builder::AstBuilder};
 use oxc_compat::ESFeature;
 use oxc_ecmascript::{
     ArrayJoin, ToBigInt, ToIntegerIndex, ToJsString,
-    constant_evaluation::{ConstantEvaluation, DetermineValueType},
+    constant_evaluation::{ConstantEvaluation, DetermineValueType, ValueType},
     side_effects::{MayHaveSideEffects, is_regexp_syntax_supported},
 };
 use oxc_span::SPAN;
@@ -146,9 +146,7 @@ impl<'a> PeepholeOptimizations {
                 return;
             }
 
-            // We don't need to check if the arguments has a side effect here.
-            //
-            // The only side effect Array::concat / String::concat can cause is throwing an error when the created array is too long.
+            // For arrays, creating the intermediate result can throw when it is too long.
             // With the compressor assumption, that error can be moved.
             //
             // For example, if we have `[].concat(a).concat(b)`, the steps before the compression is:
@@ -185,6 +183,16 @@ impl<'a> PeepholeOptimizations {
         }
 
         if collected_arguments.len() <= 1 {
+            return;
+        }
+
+        let Expression::StaticMemberExpression(member) = &*new_root_callee else { unreachable!() };
+        if matches!(member.object, Expression::StringLiteral(_))
+            && !Self::string_concat_can_interleave(
+                collected_arguments.iter().rev().flat_map(|args| args.iter()),
+                ctx,
+            )
+        {
             return;
         }
 
@@ -273,7 +281,7 @@ impl<'a> PeepholeOptimizations {
             Expression::StringLiteral(base_str) => {
                 if !ctx.supports_feature(ESFeature::ES2015TemplateLiterals)
                     || args.is_empty()
-                    || !args.iter().all(Argument::is_expression)
+                    || !Self::string_concat_can_interleave(args.iter(), ctx)
                 {
                     return None;
                 }
@@ -312,6 +320,28 @@ impl<'a> PeepholeOptimizations {
             }
             _ => None,
         }
+    }
+
+    /// `concat` evaluates every argument before coercing any of them. Templates interleave
+    /// evaluation and coercion, and flattening a chain delays the inner calls' coercions.
+    /// An earlier object's coercion can observe mutations made by a later argument.
+    fn string_concat_can_interleave<'b>(
+        arguments: impl Iterator<Item = &'b Argument<'a>>,
+        ctx: &TraverseCtx<'a>,
+    ) -> bool
+    where
+        'a: 'b,
+    {
+        let mut may_coerce_object = false;
+        for argument in arguments {
+            let Some(argument) = argument.as_expression() else { return false };
+            if may_coerce_object && argument.may_have_side_effects(ctx) {
+                return false;
+            }
+            may_coerce_object |=
+                matches!(argument.value_type(ctx), ValueType::Object | ValueType::Undetermined);
+        }
+        true
     }
 
     /// `['a','b'].join()` -> `'a,b'`
@@ -363,6 +393,54 @@ impl<'a> PeepholeOptimizations {
     ) -> TemplateElement<'a> {
         let raw = Str::from_cow_in(&Self::escape_string_for_template_literal(cooked), ast);
         TemplateElement::new(SPAN, TemplateElementValue { raw, cooked: Some(cooked) }, tail, ast)
+    }
+
+    /// Join untagged template raw text without forming an interpolation or a decimal escape
+    /// across a boundary. Empty parts do not separate the neighboring source text.
+    pub(super) fn concat_template_literal_raw<const N: usize>(
+        mut parts: [&str; N],
+        ctx: &impl GetAllocator<'a>,
+    ) -> Str<'a> {
+        let mut suffixes = [""; N];
+        for index in 0..N {
+            let Some(next) =
+                parts[index + 1..].iter().find_map(|part| part.as_bytes().first().copied())
+            else {
+                break;
+            };
+            let raw = parts[index];
+            if raw.ends_with('$') && next == b'{' {
+                let backslashes =
+                    raw[..raw.len() - 1].bytes().rev().take_while(|&byte| byte == b'\\').count();
+                if backslashes % 2 == 0 {
+                    // Escape the opening brace, leaving any preceding backslashes unchanged.
+                    suffixes[index] = "\\";
+                }
+            } else if raw.ends_with("\\0") && next.is_ascii_digit() {
+                let prefix = &raw[..raw.len() - 1];
+                let backslashes = prefix.bytes().rev().take_while(|&byte| byte == b'\\').count();
+                if backslashes % 2 == 1 {
+                    parts[index] = prefix;
+                    suffixes[index] = "x00";
+                }
+            }
+        }
+        if suffixes.iter().all(|suffix| suffix.is_empty()) {
+            return Str::from_strs_array_in(parts, ctx);
+        }
+        let capacity = parts
+            .iter()
+            .zip(suffixes)
+            .try_fold(0usize, |length, (part, suffix)| {
+                length.checked_add(part.len())?.checked_add(suffix.len())
+            })
+            .expect("template literal raw text is too long");
+        let mut raw = StringBuilder::with_capacity_in(capacity, ctx.allocator());
+        for (part, suffix) in parts.into_iter().zip(suffixes) {
+            raw.push_str(part);
+            raw.push_str(suffix);
+        }
+        Str::from(raw.into_str())
     }
 
     /// Escape a string value as template literal raw text.
