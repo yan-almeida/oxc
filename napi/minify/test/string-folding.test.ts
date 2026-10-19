@@ -17,6 +17,10 @@ const cases = [
   'var a=["before"]; function b(){a[0]="after";return "!"} globalThis.result="\\uD800".concat(a,b()).concat("tail");',
   'var a=["before"]; function b(){a[0]="after";return "!"} globalThis.result="\\uD800".concat(a).concat(b());',
   'var a=["before"]; Object.defineProperty(globalThis,"b",{get(){a[0]="after";return "!"}}); globalThis.result="\\uD800".concat(a,b);',
+  'var a=["before"]; var p={x:a,get y(){a[0]="after";return "!"}}; globalThis.result="translate(".concat(p.x,", ").concat(p.y,")");',
+  'var a=["before"]; Object.defineProperty(globalThis,"b",{get(){a[0]="after";return "!"}}); globalThis.result="\\uD800".concat(a).concat(b);',
+  'var a=["before"]; function b(){a[0]="after";return "!"} globalThis.result="".concat(a).concat(b()).concat(a).concat(a).concat(a);',
+  'var a=["before"]; function b(){a[0]="after";return "!"} globalThis.result="".concat(a,b()).concat(a);',
 ];
 
 function evaluate(source: string) {

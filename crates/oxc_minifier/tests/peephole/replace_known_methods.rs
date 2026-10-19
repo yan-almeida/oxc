@@ -1046,7 +1046,6 @@ fn test_fold_string_from_char_code() {
 fn string_concat_preserves_coercion_order() {
     test_same(r#"x = "\uD800".concat(a, b())"#);
     test_same(r#"x = "\uD800".concat(a, b()).concat("tail")"#);
-    test_same(r#"x = "\uD800".concat(a).concat(b())"#);
     // A primitive cannot observe a later argument's mutation through coercion.
     test(r#"x = "\uD800".concat(1, b())"#, r"x = `\ud8001${b()}`");
     // A local parameter read can cross an earlier coercion.
@@ -1061,10 +1060,33 @@ fn string_concat_preserves_coercion_order() {
 }
 
 #[test]
+fn string_concat_chains_preserve_call_boundaries() {
+    test(
+        r#"x = "translate(".concat(origin.x, ", ").concat(origin.y, ")")"#,
+        "x = `translate(${origin.x}, ${origin.y})`",
+    );
+    test(r#"x = "\uD800".concat(a).concat(b())"#, r"x = `\ud800${a}${b()}`");
+    // A template must preserve the argument/coercion order within every call too.
+    test_same(r#"x = "\uD800".concat(a, b()).concat(c)"#);
+    test_same(r#"x = "\uD800".concat(a).concat(b, c())"#);
+    test_same(r#"x = "\uD800".concat(...a).concat(b())"#);
+    // When flattening is unsafe, compare against the cost of the whole chain.
+    test(
+        "function f(a,b,c,d,e) { return ''.concat(a).concat(b()).concat(c).concat(d).concat(e) }",
+        "function f(a,b,c,d,e) { return `${a}${b()}${c}${d}${e}` }",
+    );
+    // A single flattened call is still shorter when all arguments are local reads.
+    test(
+        "function f(a,b,c,d,e) { return ''.concat(a).concat(b).concat(c).concat(d).concat(e) }",
+        "function f(a,b,c,d,e) { return ''.concat(a,b,c,d,e) }",
+    );
+    test_target("x = ''.concat(a).concat(b())", "x = ''.concat(a).concat(b())", "chrome40");
+}
+
+#[test]
 fn test_fold_string_concat() {
     // A lone surrogate is kept as an escape in the template's raw text.
     test_same(r#"x = "\uD800".concat(a, b)"#);
-    test_same(r#"x = "\uD800".concat(a).concat(b())"#);
     test(r#"x = "\uD83D".concat(a, "\uDE00")"#, "x = `\\ud83d${a}\\ude00`");
     test(r#"x = "\uD83D".concat("\uDE00", a)"#, "x = `\u{1F600}${a}`");
     test_same("x = ''.concat()");

@@ -187,6 +187,45 @@ impl<'a> PeepholeOptimizations {
         }
 
         let Expression::StaticMemberExpression(member) = &*new_root_callee else { unreachable!() };
+        // Convert the chain directly when each call can interleave its own argument
+        // evaluations and coercions. Keeping the calls' coercion boundaries permits
+        // later calls to mutate earlier arguments, even when flattening is unsafe.
+        if let Expression::StringLiteral(base) = &member.object
+            && ctx.supports_feature(ESFeature::ES2015TemplateLiterals)
+            && collected_arguments
+                .iter()
+                .all(|args| Self::string_concat_can_interleave(args.iter(), ctx))
+        {
+            let argument_count = collected_arguments.iter().map(|args| args.len()).sum::<usize>();
+            let expression_count = collected_arguments
+                .iter()
+                .flat_map(|args| args.iter())
+                .filter(|arg| !matches!(arg, Argument::StringLiteral(_)))
+                .count();
+            let string_count = argument_count - expression_count;
+            // If flattening is unsafe, the alternative is the whole original chain.
+            let call_count = if Self::string_concat_can_interleave(
+                collected_arguments.iter().rev().flat_map(|args| args.iter()),
+                ctx,
+            ) {
+                1
+            } else {
+                collected_arguments.len()
+            };
+            if ".concat()".len() * call_count + argument_count + "''".len() * string_count
+                >= "${}".len() * expression_count
+            {
+                let replacement = Self::fold_string_concat(
+                    original_span,
+                    base.value,
+                    collected_arguments.into_iter().rev().flat_map(|args| args.take_in(ctx)),
+                    expression_count,
+                    ctx,
+                );
+                ctx.replace_expression(node, replacement);
+                return;
+            }
+        }
         if matches!(member.object, Expression::StringLiteral(_))
             && !Self::string_concat_can_interleave(
                 collected_arguments.iter().rev().flat_map(|args| args.iter()),
@@ -297,29 +336,46 @@ impl<'a> PeepholeOptimizations {
                     return None;
                 }
 
-                let ast = &ctx.ast;
-                let mut expressions = ArenaVec::with_capacity_in(expression_count, ast);
-                let mut quasis = ArenaVec::with_capacity_in(expression_count + 1, ast);
-                let mut cooked = JSStrBuilder::new_in(ctx);
-                cooked.push_js_str(base_str.value);
-                for argument in args.drain(..) {
-                    if let Argument::StringLiteral(lit) = argument {
-                        cooked.push_js_str(lit.value);
-                    } else {
-                        let quasi = mem::replace(&mut cooked, JSStrBuilder::new_in(ctx));
-                        quasis.push(Self::template_element(quasi.into_js_str(), false, ast));
-                        expressions.push(argument.into_expression());
-                    }
-                }
-                let tail = cooked.into_js_str();
-                if expressions.is_empty() {
-                    return Some(Expression::new_string_literal(span, tail, None, ast));
-                }
-                quasis.push(Self::template_element(tail, true, ast));
-                Some(Expression::new_template_literal(span, quasis, expressions, ast))
+                Some(Self::fold_string_concat(
+                    span,
+                    base_str.value,
+                    args.drain(..),
+                    expression_count,
+                    ctx,
+                ))
             }
             _ => None,
         }
+    }
+
+    /// Build a template after checking that each original call can interleave its arguments.
+    fn fold_string_concat(
+        span: Span,
+        base: JSStr<'a>,
+        arguments: impl Iterator<Item = Argument<'a>>,
+        expression_count: usize,
+        ctx: &TraverseCtx<'a>,
+    ) -> Expression<'a> {
+        let ast = &ctx.ast;
+        let mut expressions = ArenaVec::with_capacity_in(expression_count, ast);
+        let mut quasis = ArenaVec::with_capacity_in(expression_count + 1, ast);
+        let mut cooked = JSStrBuilder::new_in(ctx);
+        cooked.push_js_str(base);
+        for argument in arguments {
+            if let Argument::StringLiteral(lit) = argument {
+                cooked.push_js_str(lit.value);
+            } else {
+                let quasi = mem::replace(&mut cooked, JSStrBuilder::new_in(ctx));
+                quasis.push(Self::template_element(quasi.into_js_str(), false, ast));
+                expressions.push(argument.into_expression());
+            }
+        }
+        let tail = cooked.into_js_str();
+        if expressions.is_empty() {
+            return Expression::new_string_literal(span, tail, None, ast);
+        }
+        quasis.push(Self::template_element(tail, true, ast));
+        Expression::new_template_literal(span, quasis, expressions, ast)
     }
 
     /// `concat` evaluates every argument before coercing any of them. Templates interleave
